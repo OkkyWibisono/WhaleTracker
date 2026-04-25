@@ -135,7 +135,8 @@ def get_top_futures_pairs(limit=20): # Batasi ke 20 agar lebih cepat
         return []
 
 def analyze_binance(symbol):
-    kline_url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval=1h&limit=24"
+    # Menggunakan interval 5m (5 menit) agar bot merespons seketika saat rally dimulai
+    kline_url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval=5m&limit=24"
     depth_url = f"https://fapi.binance.com/fapi/v1/depth?symbol={symbol}&limit=100"
     try:
         kline = requests.get(kline_url).json()
@@ -143,6 +144,7 @@ def analyze_binance(symbol):
         
         volumes = [float(c[5]) for c in kline]
         price = float(kline[-1][4])
+        open_price = float(kline[-1][1])
         bids = sum(float(b[0]) * float(b[1]) for b in depth.get('bids', []))
         asks = sum(float(a[0]) * float(a[1]) for a in depth.get('asks', []))
         
@@ -150,7 +152,9 @@ def analyze_binance(symbol):
         spike = volumes[-1] / avg_vol if avg_vol > 0 else 0
         ob_ratio = bids / asks if asks > 0 else 0
         
-        return {'symbol': symbol, 'price': price, 'spike': spike, 'ob_ratio': ob_ratio}
+        is_green = price >= open_price
+        
+        return {'symbol': symbol, 'price': price, 'spike': spike, 'ob_ratio': ob_ratio, 'is_green': is_green}
     except:
         return None
 
@@ -182,14 +186,23 @@ def main():
             for res in results:
                 if not res: continue
                 
-                # Sinyal terdeteksi jika Spike > 3x dan Orderbook dominan
+                # Sinyal terdeteksi jika Spike > 3x
                 is_whale_cex = False
                 if res['spike'] >= 3.0:
-                    if res['ob_ratio'] >= 1.5:
-                        status = "🟢 BUY WALL (LONG)"
+                    is_green = res['is_green']
+                    ob_ratio = res['ob_ratio']
+                    
+                    if ob_ratio >= 1.5 and is_green:
+                        status = "🟢 REAL PUMP (LONG)"
                         is_whale_cex = True
-                    elif res['ob_ratio'] <= 0.67:
-                        status = "🔴 SELL WALL (SHORT)"
+                    elif ob_ratio <= 0.67 and not is_green:
+                        status = "🔴 REAL DUMP (SHORT)"
+                        is_whale_cex = True
+                    elif ob_ratio >= 1.5 and not is_green:
+                        status = "⚠️ FAKEOUT DUMP (Jangan Long!)"
+                        is_whale_cex = True
+                    elif ob_ratio <= 0.67 and is_green:
+                        status = "⚠️ FAKEOUT PUMP (Jangan Short!)"
                         is_whale_cex = True
                         
                 if is_whale_cex:

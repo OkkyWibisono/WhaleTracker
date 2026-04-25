@@ -1,0 +1,10 @@
+# Environments
+.env
+
+# Tests
+test_mexc.py
+test*/
+*test.py
+
+# VS Code
+.vscode/

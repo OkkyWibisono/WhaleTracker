@@ -7,9 +7,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- KONFIGURASI ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY", "")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip('"')
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip('"')
+ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY", "").strip('"')
 last_update_id = 0
 
 # Mapping Koin ke Smart Contract Ethereum (ERC-20)
@@ -45,11 +45,14 @@ def load_dynamic_mapping():
         data = requests.get("https://api.coingecko.com/api/v3/coins/list?include_platform=true").json()
         for coin in data:
             platforms = coin.get('platforms', {})
-            if 'ethereum' in platforms and platforms['ethereum']:
-                sym = coin['symbol'].upper() + "USDT"
-                if sym not in DYNAMIC_MAPPING:
-                    DYNAMIC_MAPPING[sym] = platforms['ethereum']
-        print(f"Berhasil! {len(DYNAMIC_MAPPING)} koin ERC-20 kini telah terpetakan secara otomatis.\n")
+            sym = coin['symbol'].upper() + "USDT"
+            
+            # Prioritaskan Ethereum, jika tidak ada cari BSC
+            contract = platforms.get('ethereum') or platforms.get('binance-smart-chain')
+            
+            if contract and sym not in DYNAMIC_MAPPING:
+                DYNAMIC_MAPPING[sym] = contract
+        print(f"Berhasil! {len(DYNAMIC_MAPPING)} koin (ETH & BSC) kini telah terpetakan secara otomatis.\n")
     except Exception as e:
         print(f"Gagal menarik mapping CoinGecko: {e}. Menggunakan mapping statis...\n")
 
@@ -95,21 +98,24 @@ def sleep_and_listen(seconds):
         except:
             time.sleep(1)
 
-def get_onchain_data(base_url, api_key, contract_address, current_price):
+def get_onchain_data(api_key, contract_address, current_price, chain_id):
     if not api_key:
         return "No API Key", []
         
-    url = f"{base_url}?module=account&action=tokentx&contractaddress={contract_address}&page=1&offset=20&sort=desc&apikey={api_key}"
+    # Menggunakan Endpoint API V2 terbaru
+    url = f"https://api.etherscan.io/v2/api?chainid={chain_id}&module=account&action=tokentx&contractaddress={contract_address}&page=1&offset=20&sort=desc&apikey={api_key}"
     
     try:
         response = requests.get(url)
         data = response.json()
         
-        # Etherscan/BscScan mengembalikan status '0' jika tidak ada transaksi
+        # Etherscan/BscScan mengembalikan status '0' jika tidak ada transaksi atau ada masalah
         if data['status'] == '0':
-            if "No transactions found" in data.get('message', ''):
+            msg = data.get('message', '')
+            res = data.get('result', '')
+            if "No transactions found" in msg:
                 return "Success", []
-            return "Error", []
+            return f"API Error: {msg} ({res})", []
             
         transfers = data.get('result', [])
         massive_transfers = []
@@ -147,15 +153,15 @@ def verify_onchain_spike(symbol, current_price):
     if not contract_address:
         return "NotSupported", []
 
-    # 1. Coba Ethereum (Prioritas)
-    status, txs = get_onchain_data("https://api.etherscan.io/api", ETHERSCAN_API_KEY, contract_address, current_price)
+    # 1. Coba Ethereum (Chain ID: 1)
+    status, txs = get_onchain_data(ETHERSCAN_API_KEY, contract_address, current_price, 1)
     if status == "Success" and txs:
         return "Success (ETH)", txs
         
-    # 2. Coba BSC (Jika ETH kosong/error)
-    bsc_api_key = os.getenv("BSCSCAN_API_KEY")
+    # 2. Coba BSC (Chain ID: 56)
+    bsc_api_key = os.getenv("BSCSCAN_API_KEY", "").strip('"')
     if bsc_api_key:
-        status_bsc, txs_bsc = get_onchain_data("https://api.bscscan.com/api", bsc_api_key, contract_address, current_price)
+        status_bsc, txs_bsc = get_onchain_data(bsc_api_key, contract_address, current_price, 56)
         if status_bsc == "Success" and txs_bsc:
             return "Success (BSC)", txs_bsc
 
@@ -242,10 +248,16 @@ def analyze_binance(symbol):
         funding_rate = float(funding_data.get('lastFundingRate', 0)) * 100 
         open_interest = float(oi_data.get('openInterest', 0))
         
+        # Deteksi Breakout (Menembus High 3 candle terakhir)
+        highs = [float(k[2]) for k in kline[-4:-1]]
+        max_high_3 = max(highs) if highs else price
+        is_breakout = price > max_high_3
+        
         return {
             'symbol': symbol, 'price': price, 'spike': spike, 
             'ob_ratio': ob_ratio, 'is_green': is_green, 'rsi': rsi,
-            'ema9': ema9, 'ema21': ema21, 'funding': funding_rate, 'oi': open_interest
+            'ema9': ema9, 'ema21': ema21, 'funding': funding_rate, 
+            'oi': open_interest, 'is_breakout': is_breakout
         }
     except:
         return None
@@ -296,6 +308,9 @@ def main():
                         is_whale_cex = True
                     elif ob_ratio <= 0.67 and not is_green:
                         status = "🔴 REAL DUMP (SHORT)"
+                        is_whale_cex = True
+                    elif res['is_breakout'] and is_green and res['spike'] >= 1.5:
+                        status = "🚀 ACCUMULATION (BREAKOUT)"
                         is_whale_cex = True
                     elif ob_ratio >= 1.5 and not is_green:
                         status = "⚠️ FAKEOUT DUMP (Jangan Long!)"
@@ -350,13 +365,13 @@ def main():
                     
                     # 2. Trend Score (Max 25)
                     # Sinyal searah trend = 25. Sinyal pembalikan (Fakeout) saat trend jenuh = 25.
-                    if (trend == "UPTREND 📈" and "LONG" in status): score += 25
+                    if (trend == "UPTREND 📈" and ("LONG" in status or "ACCUMULATION" in status)): score += 25
                     elif (trend == "DOWNTREND 📉" and "SHORT" in status): score += 25
                     elif (trend == "UPTREND 📈" and "FAKEOUT PUMP" in status and rsi_val >= 70): score += 25
                     elif (trend == "DOWNTREND 📉" and "FAKEOUT DUMP" in status and rsi_val <= 30): score += 25
                     
                     # 3. RSI Score (Max 20)
-                    if "LONG" in status and rsi_val < 65: score += 20
+                    if ("LONG" in status or "ACCUMULATION" in status) and rsi_val < 65: score += 20
                     elif "SHORT" in status and rsi_val > 35: score += 20
                     elif "FAKEOUT PUMP" in status and rsi_val >= 70: score += 20
                     elif "FAKEOUT DUMP" in status and rsi_val <= 30: score += 20
@@ -385,20 +400,22 @@ def main():
                     msg += f"🎯 *Target Profit (2%):* ${tp:.4f}\n"
                     msg += f"🛡 *Stop Loss (1%):* ${sl:.4f}\n\n"
                     
-                    if onchain_status == "Success":
+                    if onchain_status == "Success (ETH)" or onchain_status == "Success (BSC)":
                         if massive_txs:
-                            msg += "💎 *ON-CHAIN TERKONFIRMASI!* 💎\n"
-                            msg += f"Terdeteksi {len(massive_txs)} transfer > $100.000 di jaringan Ethereum saat ini!\n"
+                            network_name = "ETHEREUM" if "ETH" in onchain_status else "BNB CHAIN"
+                            msg += f"💎 *ON-CHAIN TERKONFIRMASI ({network_name})* 💎\n"
+                            msg += f"Terdeteksi {len(massive_txs)} transfer > $30.000 saat ini!\n"
                             largest = max(massive_txs, key=lambda x: x['usd_value'])
+                            explorer_url = f"https://etherscan.io/tx/{largest['hash']}" if "ETH" in onchain_status else f"https://bscscan.com/tx/{largest['hash']}"
                             msg += f"🐋 Aliran: *{largest['flow']}*\n"
                             msg += f"💰 Nilai: *${largest['usd_value']:,.0f}*\n"
-                            msg += f"🔍 [Cek Etherscan](https://etherscan.io/tx/{largest['hash']})\n"
-                            
-                            print(f"-> VALID! Flow: {largest['flow']} | Nilai: ${largest['usd_value']:,.0f}")
+                            msg += f"🔍 [Cek Explorer]({explorer_url})\n"
                         else:
                             msg += "❌ *ON-CHAIN FAKEOUT* ❌\n"
-                            msg += "Tidak ada pergerakan Whale di Blockchain. Kemungkinan ini adalah **SPOOFING (Tembok Palsu)** oleh Whale di Exchange!\n"
-                            print("-> FAKEOUT! Tidak ada transfer paus di On-Chain.")
+                            msg += "Tidak ada pergerakan Whale di Blockchain. Kemungkinan ini adalah **SPOOFING (Tembok Palsu)**!\n"
+                    elif onchain_status == "NotSupported":
+                        msg += "⚪ *INFO ON-CHAIN*\n"
+                        msg += "Koin ini adalah koin Native atau Jaringan belum didukung untuk verifikasi On-Chain.\n"
                     else:
                         print(f"-> (Info On-Chain diabaikan karena status: {onchain_status})")
                     

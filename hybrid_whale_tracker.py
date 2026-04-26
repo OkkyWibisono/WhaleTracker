@@ -134,6 +134,32 @@ def get_top_futures_pairs(limit=20): # Batasi ke 20 agar lebih cepat
     except:
         return []
 
+def calculate_rsi(prices, period=14):
+    if len(prices) < period + 1:
+        return 50.0
+    
+    gains = []
+    losses = []
+    for i in range(1, len(prices)):
+        change = prices[i] - prices[i-1]
+        if change > 0:
+            gains.append(change)
+            losses.append(0)
+        else:
+            gains.append(0)
+            losses.append(abs(change))
+            
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+        
+    if avg_loss == 0:
+        return 100.0
+    return 100.0 - (100.0 / (1.0 + (avg_gain / avg_loss)))
+
 def analyze_binance(symbol):
     # Menggunakan interval 5m (5 menit) agar bot merespons seketika saat rally dimulai
     kline_url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval=5m&limit=24"
@@ -143,7 +169,8 @@ def analyze_binance(symbol):
         depth = requests.get(depth_url).json()
         
         volumes = [float(c[5]) for c in kline]
-        price = float(kline[-1][4])
+        closes = [float(c[4]) for c in kline]
+        price = closes[-1]
         open_price = float(kline[-1][1])
         bids = sum(float(b[0]) * float(b[1]) for b in depth.get('bids', []))
         asks = sum(float(a[0]) * float(a[1]) for a in depth.get('asks', []))
@@ -153,8 +180,9 @@ def analyze_binance(symbol):
         ob_ratio = bids / asks if asks > 0 else 0
         
         is_green = price >= open_price
+        rsi = calculate_rsi(closes)
         
-        return {'symbol': symbol, 'price': price, 'spike': spike, 'ob_ratio': ob_ratio, 'is_green': is_green}
+        return {'symbol': symbol, 'price': price, 'spike': spike, 'ob_ratio': ob_ratio, 'is_green': is_green, 'rsi': rsi}
     except:
         return None
 
@@ -212,10 +240,31 @@ def main():
                     
                     onchain_status, massive_txs = verify_onchain_spike(res['symbol'], res['price'])
                     
+                    rsi_val = res['rsi']
+                    is_green = res['is_green']
+                    
+                    if rsi_val >= 70:
+                        rsi_text = f"🔥 {rsi_val:.1f} (Overbought)\n🔮 *Prediksi:* Rawan terbanting turun (Reversal) segera!"
+                    elif rsi_val <= 30:
+                        rsi_text = f"❄️ {rsi_val:.1f} (Oversold)\n🔮 *Prediksi:* Berpotensi memantul keras ke atas (V-Shape Recovery)!"
+                    elif rsi_val >= 60:
+                        if not is_green:
+                            rsi_text = f"⚠️ {rsi_val:.1f} (Cooling Down)\n🔮 *Prediksi:* RSI mulai menukik dari puncak. Potensi koreksi turun membesar!"
+                        else:
+                            rsi_text = f"📈 {rsi_val:.1f} (Bullish)\n🔮 *Prediksi:* Tren naik sangat kuat, berpotensi lanjut."
+                    elif rsi_val <= 40:
+                        if is_green:
+                            rsi_text = f"🚀 {rsi_val:.1f} (Recovery)\n🔮 *Prediksi:* RSI mulai menanjak dari dasar. Potensi pembalikan arah (Reversal Naik)!"
+                        else:
+                            rsi_text = f"📉 {rsi_val:.1f} (Bearish)\n🔮 *Prediksi:* Tren turun kuat, pisaunya masih meluncur."
+                    else:
+                        rsi_text = f"⚖️ {rsi_val:.1f} (Netral)\n🔮 *Prediksi:* Pasar berkonsolidasi, arah belum pasti."
+                    
                     msg = f"🚨 *HYBRID WHALE ALERT* 🚨\n\n"
                     msg += f"🔥 *{res['symbol']}* {status}\n"
                     msg += f"💲 Harga: ${res['price']}\n"
-                    msg += f"📊 Volume Spike: {res['spike']:.2f}x\n\n"
+                    msg += f"📊 Volume Spike: {res['spike']:.2f}x\n"
+                    msg += f"🧭 RSI (5m): {rsi_text}\n\n"
                     
                     if onchain_status == "Success":
                         if massive_txs:

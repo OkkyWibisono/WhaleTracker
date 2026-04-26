@@ -26,6 +26,17 @@ STATIC_ERC20_MAPPING = {
     "CRVUSDT":  "0xD533a949740bb3306d119CC777fa900bA034cd52",
 }
 
+# Daftar Wallet Bursa Utama (Ethereum) untuk Deteksi Inflow/Outflow
+EXCHANGE_WALLETS = {
+    "0x28c6c06290cc3f951793910ee5b36e59d909c01b": "Binance Hot Wallet",
+    "0x21a31ee1afc51d94c2efccaa2092ad10282715e8": "Binance 15",
+    "0xdfd5293d8e347dfe59e90efd55b2956a1343963d": "Binance 16",
+    "0xab5c66752a9e8167967685f1450532fb96d5d24f": "Bybit 1",
+    "0xee587ae34da07f5979f4ca3c229340f13a07851a": "Bybit 2",
+    "0xa7ef1108d951804f32c914e9f73f27806b72d244": "OKX 1",
+    "0x6cc5f688a315f3dc28a7781717a9a798a59fda7b": "OKX 2",
+}
+
 DYNAMIC_MAPPING = {}
 
 def load_dynamic_mapping():
@@ -84,44 +95,71 @@ def sleep_and_listen(seconds):
         except:
             time.sleep(1)
 
-def verify_onchain_spike(symbol, current_price):
-    """Mengecek apakah ada transaksi raksasa di Blockchain pada waktu bersamaan"""
-    contract_address = STATIC_ERC20_MAPPING.get(symbol) or DYNAMIC_MAPPING.get(symbol)
-    
-    if not contract_address:
-        return "NotSupported", []
+def get_onchain_data(base_url, api_key, contract_address, current_price):
+    if not api_key:
+        return "No API Key", []
         
-    api_param = f"&apikey={ETHERSCAN_API_KEY}" if ETHERSCAN_API_KEY else ""
-    
-    # Ambil 20 transaksi TERBARU secara global untuk koin tersebut di Ethereum
-    url = f"https://api.etherscan.io/api?module=account&action=tokentx&contractaddress={contract_address}&page=1&offset=20&sort=desc{api_param}"
+    url = f"{base_url}?module=account&action=tokentx&contractaddress={contract_address}&page=1&offset=20&sort=desc&apikey={api_key}"
     
     try:
         response = requests.get(url)
         data = response.json()
-        if data['status'] != '1':
+        
+        # Etherscan/BscScan mengembalikan status '0' jika tidak ada transaksi
+        if data['status'] == '0':
+            if "No transactions found" in data.get('message', ''):
+                return "Success", []
             return "Error", []
             
-        transfers = data['result']
+        transfers = data.get('result', [])
         massive_transfers = []
         
-        # Cari transaksi bernilai raksasa (> $100.000 USD)
         for tx in transfers:
-            # Etherscan memberikan info desimal koin secara langsung pada response
-            decimals = int(tx['tokenDecimal'])
+            decimals = int(tx.get('tokenDecimal', 18))
             token_amount = float(tx['value']) / (10 ** decimals)
             usd_value = token_amount * current_price
             
-            if usd_value >= 100000: # Batas paus: $100k ke atas
+            if usd_value >= 100000:
+                from_addr = tx['from'].lower()
+                to_addr = tx['to'].lower()
+                flow_type = "TRANSFER"
+                
+                if to_addr in EXCHANGE_WALLETS:
+                    flow_type = "INFLOW (Potensi Jual/DUMP) 📥"
+                elif from_addr in EXCHANGE_WALLETS:
+                    flow_type = "OUTFLOW (Potensi Akumulasi/PUMP) 📤"
+                
                 massive_transfers.append({
                     'hash': tx['hash'],
                     'amount': token_amount,
-                    'usd_value': usd_value
+                    'usd_value': usd_value,
+                    'flow': flow_type
                 })
         
         return "Success", massive_transfers
     except:
         return "Error", []
+
+def verify_onchain_spike(symbol, current_price):
+    """Mengecek transaksi paus di Ethereum dan BSC"""
+    contract_address = STATIC_ERC20_MAPPING.get(symbol) or DYNAMIC_MAPPING.get(symbol)
+    
+    if not contract_address:
+        return "NotSupported", []
+
+    # 1. Coba Ethereum (Prioritas)
+    status, txs = get_onchain_data("https://api.etherscan.io/api", ETHERSCAN_API_KEY, contract_address, current_price)
+    if status == "Success" and txs:
+        return "Success (ETH)", txs
+        
+    # 2. Coba BSC (Jika ETH kosong/error)
+    bsc_api_key = os.getenv("BSCSCAN_API_KEY")
+    if bsc_api_key:
+        status_bsc, txs_bsc = get_onchain_data("https://api.bscscan.com/api", bsc_api_key, contract_address, current_price)
+        if status_bsc == "Success" and txs_bsc:
+            return "Success (BSC)", txs_bsc
+
+    return status, []
 
 # --- KODE TRACKER BINANCE (SAMA SEPERTI SEBELUMNYA) ---
 def get_top_futures_pairs(limit=10): # Batasi ke 20 agar lebih cepat
@@ -302,8 +340,36 @@ def main():
                         tp = price * 0.98 # -2%
                         sl = price * 1.01 # +1%
 
+                    # --- CALCULATE CONFIDENCE SCORE (0-100) ---
+                    score = 0
+                    
+                    # 1. Volume Score (Max 30)
+                    if res['spike'] >= 10: score += 30
+                    elif res['spike'] >= 5: score += 20
+                    else: score += 10
+                    
+                    # 2. Trend Score (Max 25)
+                    if (trend == "UPTREND 📈" and "LONG" in status) or (trend == "DOWNTREND 📉" and "SHORT" in status):
+                        score += 25
+                    
+                    # 3. RSI Score (Max 20)
+                    if "LONG" in status and rsi_val < 65: score += 20
+                    elif "SHORT" in status and rsi_val > 35: score += 20
+                    
+                    # 4. On-Chain Score (Max 25)
+                    if onchain_status == "Success" and massive_txs:
+                        score += 25
+                    
+                    # Rating Penilaian
+                    if score >= 80: rating = "⭐⭐⭐⭐⭐ (HIGH CONVICTION)"
+                    elif score >= 60: rating = "⭐⭐⭐ (MEDIUM)"
+                    else: rating = "⭐ (LOW - Hati-hati)"
+
                     msg = f"🚨 *HYBRID WHALE ALERT* 🚨\n\n"
                     msg += f"🔥 *{res['symbol']}* {status}\n"
+                    msg += f"🏆 **Confidence Score: {score}/100**\n"
+                    msg += f"📊 Rating: *{rating}*\n\n"
+                    
                     msg += f"📊 Tren: *{trend}*\n"
                     msg += f"💲 Harga: ${price}\n"
                     msg += f"📊 Volume Spike: {res['spike']:.2f}x\n"
@@ -319,10 +385,11 @@ def main():
                             msg += "💎 *ON-CHAIN TERKONFIRMASI!* 💎\n"
                             msg += f"Terdeteksi {len(massive_txs)} transfer > $100.000 di jaringan Ethereum saat ini!\n"
                             largest = max(massive_txs, key=lambda x: x['usd_value'])
-                            msg += f"🐋 Transfer Terbesar: *${largest['usd_value']:,.0f}*\n"
+                            msg += f"🐋 Aliran: *{largest['flow']}*\n"
+                            msg += f"💰 Nilai: *${largest['usd_value']:,.0f}*\n"
                             msg += f"🔍 [Cek Etherscan](https://etherscan.io/tx/{largest['hash']})\n"
                             
-                            print(f"-> VALID! Ditemukan {len(massive_txs)} transfer paus. Terbesar: ${largest['usd_value']:,.0f}")
+                            print(f"-> VALID! Flow: {largest['flow']} | Nilai: ${largest['usd_value']:,.0f}")
                         else:
                             msg += "❌ *ON-CHAIN FAKEOUT* ❌\n"
                             msg += "Tidak ada pergerakan Whale di Blockchain. Kemungkinan ini adalah **SPOOFING (Tembok Palsu)** oleh Whale di Exchange!\n"

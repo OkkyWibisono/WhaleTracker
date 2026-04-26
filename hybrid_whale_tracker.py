@@ -119,7 +119,7 @@ def get_onchain_data(base_url, api_key, contract_address, current_price):
             token_amount = float(tx['value']) / (10 ** decimals)
             usd_value = token_amount * current_price
             
-            if usd_value >= 100000:
+            if usd_value >= 30000: # Ambang batas micin: $30k ke atas
                 from_addr = tx['from'].lower()
                 to_addr = tx['to'].lower()
                 flow_type = "TRANSFER"
@@ -162,7 +162,7 @@ def verify_onchain_spike(symbol, current_price):
     return status, []
 
 # --- KODE TRACKER BINANCE (SAMA SEPERTI SEBELUMNYA) ---
-def get_top_futures_pairs(limit=10): # Batasi ke 20 agar lebih cepat
+def get_top_futures_pairs(limit=100): # Pantau 100 koin untuk berburu micin
     url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
     try:
         data = requests.get(url).json()
@@ -349,12 +349,17 @@ def main():
                     else: score += 10
                     
                     # 2. Trend Score (Max 25)
-                    if (trend == "UPTREND 📈" and "LONG" in status) or (trend == "DOWNTREND 📉" and "SHORT" in status):
-                        score += 25
+                    # Sinyal searah trend = 25. Sinyal pembalikan (Fakeout) saat trend jenuh = 25.
+                    if (trend == "UPTREND 📈" and "LONG" in status): score += 25
+                    elif (trend == "DOWNTREND 📉" and "SHORT" in status): score += 25
+                    elif (trend == "UPTREND 📈" and "FAKEOUT PUMP" in status and rsi_val >= 70): score += 25
+                    elif (trend == "DOWNTREND 📉" and "FAKEOUT DUMP" in status and rsi_val <= 30): score += 25
                     
                     # 3. RSI Score (Max 20)
                     if "LONG" in status and rsi_val < 65: score += 20
                     elif "SHORT" in status and rsi_val > 35: score += 20
+                    elif "FAKEOUT PUMP" in status and rsi_val >= 70: score += 20
+                    elif "FAKEOUT DUMP" in status and rsi_val <= 30: score += 20
                     
                     # 4. On-Chain Score (Max 25)
                     if onchain_status == "Success" and massive_txs:

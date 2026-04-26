@@ -124,7 +124,7 @@ def verify_onchain_spike(symbol, current_price):
         return "Error", []
 
 # --- KODE TRACKER BINANCE (SAMA SEPERTI SEBELUMNYA) ---
-def get_top_futures_pairs(limit=20): # Batasi ke 20 agar lebih cepat
+def get_top_futures_pairs(limit=10): # Batasi ke 20 agar lebih cepat
     url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
     try:
         data = requests.get(url).json()
@@ -297,10 +297,18 @@ def main():
             sleep_and_listen(30)
             
         except KeyboardInterrupt:
-            print("\nProgram dihentikan.")
+            print("\nProgram dihentikan secara manual.")
+            send_telegram_message("🛑 *Bot Hybrid Dimatikan (Manual)*\nPemantauan pasar telah dihentikan.")
             break
         except Exception as e:
+            error_msg = f"⚠️ *BOT ERROR*\nTerjadi kesalahan sistem:\n`{e}`\n\nMencoba restart mandiri dalam 10 detik..."
+            print(f"\n[ERROR] {e}")
+            send_telegram_message(error_msg)
             time.sleep(10)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as fatal_e:
+        print(f"FATAL CRASH: {fatal_e}")
+        send_telegram_message(f"💀 *FATAL CRASH*\nSkrip bot mati total dan keluar dari sistem! Error:\n`{fatal_e}`")

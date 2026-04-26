@@ -160,6 +160,14 @@ def calculate_rsi(prices, period=14):
         return 100.0
     return 100.0 - (100.0 / (1.0 + (avg_gain / avg_loss)))
 
+def calculate_ema(prices, period):
+    if len(prices) < period: return 0
+    multiplier = 2 / (period + 1)
+    ema = sum(prices[:period]) / period
+    for price in prices[period:]:
+        ema = (price - ema) * multiplier + ema
+    return ema
+
 def analyze_binance(symbol):
     # Menggunakan interval 5m (5 menit) agar bot merespons seketika saat rally dimulai
     kline_url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval=5m&limit=24"
@@ -182,7 +190,25 @@ def analyze_binance(symbol):
         is_green = price >= open_price
         rsi = calculate_rsi(closes)
         
-        return {'symbol': symbol, 'price': price, 'spike': spike, 'ob_ratio': ob_ratio, 'is_green': is_green, 'rsi': rsi}
+        # --- NEW: Trend & Market Info ---
+        ema9 = calculate_ema(closes, 9)
+        ema21 = calculate_ema(closes, 21)
+        
+        # Funding Rate & Open Interest
+        funding_url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}"
+        oi_url = f"https://fapi.binance.com/fapi/v1/openInterest?symbol={symbol}"
+        
+        funding_data = requests.get(funding_url).json()
+        oi_data = requests.get(oi_url).json()
+        
+        funding_rate = float(funding_data.get('lastFundingRate', 0)) * 100 
+        open_interest = float(oi_data.get('openInterest', 0))
+        
+        return {
+            'symbol': symbol, 'price': price, 'spike': spike, 
+            'ob_ratio': ob_ratio, 'is_green': is_green, 'rsi': rsi,
+            'ema9': ema9, 'ema21': ema21, 'funding': funding_rate, 'oi': open_interest
+        }
     except:
         return None
 
@@ -220,6 +246,13 @@ def main():
                     is_green = res['is_green']
                     ob_ratio = res['ob_ratio']
                     
+                    # Penentuan Tren berdasarkan EMA
+                    trend = "SIDEWAYS"
+                    if res['price'] > res['ema21'] and res['ema9'] > res['ema21']:
+                        trend = "UPTREND 📈"
+                    elif res['price'] < res['ema21'] and res['ema9'] < res['ema21']:
+                        trend = "DOWNTREND 📉"
+
                     if ob_ratio >= 1.5 and is_green:
                         status = "🟢 REAL PUMP (LONG)"
                         is_whale_cex = True
@@ -260,11 +293,26 @@ def main():
                     else:
                         rsi_text = f"⚖️ {rsi_val:.1f} (Netral)\n🔮 *Prediksi:* Pasar berkonsolidasi, arah belum pasti."
                     
+                    # Hitung TP/SL Otomatis (Risk 1:2)
+                    price = res['price']
+                    if "LONG" in status or (is_green and "PUMP" in status):
+                        tp = price * 1.02 # +2%
+                        sl = price * 0.99 # -1%
+                    else:
+                        tp = price * 0.98 # -2%
+                        sl = price * 1.01 # +1%
+
                     msg = f"🚨 *HYBRID WHALE ALERT* 🚨\n\n"
                     msg += f"🔥 *{res['symbol']}* {status}\n"
-                    msg += f"💲 Harga: ${res['price']}\n"
+                    msg += f"📊 Tren: *{trend}*\n"
+                    msg += f"💲 Harga: ${price}\n"
                     msg += f"📊 Volume Spike: {res['spike']:.2f}x\n"
-                    msg += f"🧭 RSI (5m): {rsi_text}\n\n"
+                    msg += f"🧭 RSI (5m): {rsi_text}\n"
+                    msg += f"🏦 Open Interest: ${res['oi']:,.0f}\n"
+                    msg += f"💳 Funding Rate: {res['funding']:.4f}%\n\n"
+                    
+                    msg += f"🎯 *Target Profit (2%):* ${tp:.4f}\n"
+                    msg += f"🛡 *Stop Loss (1%):* ${sl:.4f}\n\n"
                     
                     if onchain_status == "Success":
                         if massive_txs:

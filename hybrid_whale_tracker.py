@@ -346,14 +346,20 @@ def main():
                     else:
                         rsi_text = f"⚖️ {rsi_val:.1f} (Netral)\n🔮 *Prediksi:* Pasar berkonsolidasi, arah belum pasti."
                     
-                    # Hitung TP/SL Otomatis (Risk 1:2)
+                    # Hitung TP/SL Otomatis (Smart Reversal Logic)
                     price = res['price']
-                    if "LONG" in status or (is_green and "PUMP" in status):
+                    if "LONG" in status or "ACCUMULATION" in status or "FAKEOUT DUMP" in status:
+                        # Strategi Naik (Bullish / Reversal Naik)
                         tp = price * 1.02 # +2%
                         sl = price * 0.99 # -1%
-                    else:
+                    elif "SHORT" in status or "FAKEOUT PUMP" in status:
+                        # Strategi Turun (Bearish / Reversal Turun)
                         tp = price * 0.98 # -2%
                         sl = price * 1.01 # +1%
+                    else:
+                        # Default berdasarkan arah candle
+                        tp = price * 1.02 if is_green else price * 0.98
+                        sl = price * 0.99 if is_green else price * 1.01
 
                     # --- CALCULATE CONFIDENCE SCORE (0-100) ---
                     score = 0
@@ -397,25 +403,39 @@ def main():
                     msg += f"🏦 Open Interest: ${res['oi']:,.0f}\n"
                     msg += f"💳 Funding Rate: {res['funding']:.4f}%\n\n"
                     
+                    msg += f"📥 *Titik Entry:* ${price}\n"
                     msg += f"🎯 *Target Profit (2%):* ${tp:.4f}\n"
                     msg += f"🛡 *Stop Loss (1%):* ${sl:.4f}\n\n"
                     
-                    if onchain_status == "Success (ETH)" or onchain_status == "Success (BSC)":
+                    if "Success" in onchain_status:
                         if massive_txs:
                             network_name = "ETHEREUM" if "ETH" in onchain_status else "BNB CHAIN"
                             msg += f"💎 *ON-CHAIN TERKONFIRMASI ({network_name})* 💎\n"
                             msg += f"Terdeteksi {len(massive_txs)} transfer > $30.000 saat ini!\n"
                             largest = max(massive_txs, key=lambda x: x['usd_value'])
                             explorer_url = f"https://etherscan.io/tx/{largest['hash']}" if "ETH" in onchain_status else f"https://bscscan.com/tx/{largest['hash']}"
+                            
+                            # Tentukan Rekomendasi berdasarkan Aliran Dana
+                            if "OUTFLOW" in largest['flow']:
+                                recommendation = "✅ **REKOMENDASI: LONG (Paus sedang Akumulasi!)**"
+                            elif "INFLOW" in largest['flow']:
+                                recommendation = "⚠️ **REKOMENDASI: SHORT/EXIT (Paus bersiap Jualan!)**"
+                            else:
+                                recommendation = "ℹ️ **REKOMENDASI: Amati Konfirmasi Harga (Transfer Wallet)**"
+
                             msg += f"🐋 Aliran: *{largest['flow']}*\n"
                             msg += f"💰 Nilai: *${largest['usd_value']:,.0f}*\n"
+                            msg += f"{recommendation}\n"
                             msg += f"🔍 [Cek Explorer]({explorer_url})\n"
+                            print(f"-> [VALID] Flow: {largest['flow']} | Nilai: ${largest['usd_value']:,.0f}")
                         else:
                             msg += "❌ *ON-CHAIN FAKEOUT* ❌\n"
                             msg += "Tidak ada pergerakan Whale di Blockchain. Kemungkinan ini adalah **SPOOFING (Tembok Palsu)**!\n"
+                            print("-> [FAKEOUT] Tidak ada bukti transfer paus di On-Chain.")
                     elif onchain_status == "NotSupported":
                         msg += "⚪ *INFO ON-CHAIN*\n"
                         msg += "Koin ini adalah koin Native atau Jaringan belum didukung untuk verifikasi On-Chain.\n"
+                        print("-> [INFO] On-Chain tidak didukung untuk koin ini.")
                     else:
                         print(f"-> (Info On-Chain diabaikan karena status: {onchain_status})")
                     
